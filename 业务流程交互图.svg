@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 770" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <style>
+    .panel{fill:#ffffff;stroke:#d8d2c7;stroke-width:1.5;}
+    .phead{fill:#ece7df;stroke:#d8d2c7;stroke-width:1.5;}
+    .ptitle{fill:#2d2a27;font-size:15px;font-weight:700;}
+    .box{fill:#ffffff;stroke:#3f6b78;stroke-width:1.5;rx:6;}
+    .bbox{fill:#e3ecee;stroke:#3f6b78;stroke-width:1.5;rx:6;}
+    .bmain{fill:#2d2a27;font-size:13px;font-weight:600;}
+    .bsub{fill:#5c5650;font-size:11px;}
+    .arrow{stroke:#3f6b78;stroke-width:1.8;fill:none;}
+    .anum{fill:#3f6b78;font-size:12px;font-weight:700;}
+    .acc{fill:#3f6b78;font-size:12.5px;font-weight:700;}
+    .note{fill:#a86a4c;font-size:11.5px;}
+    .nest{fill:#f4f1ea;stroke:#c9c2b6;stroke-width:1.2;rx:6;}
+    .nl{fill:#5c5650;font-size:11px;}
+    .nlh{fill:#2d2a27;font-size:11.5px;font-weight:700;}
+    .ttl{fill:#2d2a27;font-size:17px;font-weight:700;}
+    .role{fill:#5c5650;font-size:12px;}
+  </style>
+
+  <text x="380" y="30" text-anchor="middle" class="ttl">phosphor-state-manager</text>
+  <text x="380" y="50" text-anchor="middle" class="role">状态权威 + systemd 编排 · 开机/关机/重启状态的唯一真相来源</text>
+
+  <!-- Panel A 业务流程 -->
+  <rect class="panel" x="20" y="64" width="720" height="332" rx="6"/>
+  <rect class="phead" x="20" y="64" width="720" height="32" rx="6"/>
+  <text x="34" y="86" class="ptitle">一、业务流程：一次开机如何走完状态机</text>
+
+  <rect class="box" x="90" y="104" width="580" height="34" rx="6"/>
+  <text x="110" y="126" class="bmain">用户 / Web / Redfish / IPMI 下发 RequestedHostTransition = On</text>
+
+  <line class="arrow" x1="380" y1="138" x2="380" y2="152"/>
+  <polygon points="372,150 388,150 380,162" fill="#3f6b78"/>
+
+  <rect class="box" x="90" y="162" width="580" height="50" rx="6"/>
+  <text x="110" y="182" class="bmain">① 校验：BMC 是否 Ready？固件是否在升级？（可配置开关）</text>
+  <text x="110" y="200" class="bsub">host_state_manager.cpp:388  requestedHostTransition 入口</text>
+
+  <line class="arrow" x1="380" y1="212" x2="380" y2="226"/>
+  <polygon points="372,224 388,224 380,236" fill="#3f6b78"/>
+
+  <rect class="box" x="90" y="226" width="580" height="50" rx="6"/>
+  <text x="110" y="246" class="bmain">② executeTransition() → systemctl start obmc-host-start@0.target</text>
+  <text x="110" y="264" class="bsub">对 org.freedesktop.systemd1 调 StartUnit（意图下达给 systemd）</text>
+
+  <line class="arrow" x1="380" y1="276" x2="380" y2="290"/>
+  <polygon points="372,288 388,288 380,300" fill="#3f6b78"/>
+
+  <rect class="box" x="90" y="300" width="580" height="34" rx="6"/>
+  <text x="110" y="322" class="bmain">③ systemd 拉起整条服务链 → x86-power-control 拉电源 GPIO</text>
+
+  <line class="arrow" x1="380" y1="334" x2="380" y2="348"/>
+  <polygon points="372,346 388,346 380,358" fill="#3f6b78"/>
+
+  <rect class="bbox" x="90" y="358" width="580" height="50" rx="6"/>
+  <text x="110" y="378" class="bmain">④ 回填：systemd_target_signal 监听 JobRemoved</text>
+  <text x="110" y="396" class="bsub">把 job 结果写回 CurrentHostState / CurrentPowerState（D-Bus 广播）</text>
+
+  <text x="700" y="184" text-anchor="end" class="note">⑤ 每次 transition 都</text>
+  <text x="700" y="200" text-anchor="end" class="note">serialize() 持久化，</text>
+  <text x="700" y="216" text-anchor="end" class="note">重启后 discover_system_state</text>
+  <text x="700" y="232" text-anchor="end" class="note">据 PowerRestorePolicy 恢复</text>
+
+  <!-- Panel B 体系结构 -->
+  <rect class="panel" x="20" y="408" width="720" height="180" rx="6"/>
+  <rect class="phead" x="20" y="408" width="720" height="32" rx="6"/>
+  <text x="34" y="430" class="ptitle">二、代码体系结构：四层嵌套状态机</text>
+
+  <rect class="nest" x="60" y="448" width="400" height="120" rx="6"/>
+  <text x="74" y="466" class="nlh">BMC（管理者自身：Standby → Ready）</text>
+  <rect class="nest" x="92" y="472" width="336" height="88" rx="6"/>
+  <text x="106" y="490" class="nlh">Chassis（电源域：通电没 → CurrentPowerState）</text>
+  <rect class="nest" x="124" y="494" width="272" height="56" rx="6"/>
+  <text x="138" y="512" class="nlh">Host（计算域：Running/Off/Quiesced）</text>
+  <rect class="nest" x="156" y="520" width="208" height="22" rx="4"/>
+  <text x="170" y="535" class="nl">Hypervisor（Host 内一层，跟随 boot progress）</text>
+
+  <text x="496" y="458" class="nlh">同构模式（理解一个就懂半个仓库）：</text>
+  <text x="496" y="480" class="nl">transition setter = 拉起 systemd target</text>
+  <text x="496" y="500" class="nl">Current* 属性 = systemd job 结果回填</text>
+  <text x="496" y="524" class="nl">原生多实例（host_state_manager_main</text>
+  <text x="496" y="540" class="nl">  -h/--host），一个 BMC 可管多个 Host</text>
+  <text x="496" y="564" class="nl">关键文件：</text>
+  <text x="496" y="582" class="nl">· host_state_manager.cpp:388</text>
+  <text x="496" y="598" class="nl">· systemd_target_signal.cpp</text>
+  <text x="496" y="614" class="nl">· discover_system_state.cpp</text>
+
+  <!-- Panel C 交互 -->
+  <rect class="panel" x="20" y="600" width="720" height="150" rx="6"/>
+  <rect class="phead" x="20" y="600" width="720" height="32" rx="6"/>
+  <text x="34" y="622" class="ptitle">三、对外 D-Bus 交互</text>
+
+  <text x="40" y="650" class="acc">入站（被谁调）：</text>
+  <text x="40" y="670" class="nl">· 用户/Web/Redfish/IPMI → State.Host.Transition.RequestedHostTransition（下发开机意图）</text>
+  <text x="40" y="690" class="nl">· 路径 /xyz/openbmc_project/state/{bmc,chassis,host,scheduled/host}0</text>
+
+  <text x="40" y="714" class="acc">出站（调谁）：</text>
+  <text x="40" y="734" class="nl">· systemd StartUnit(target) ｜ x86-power-control 读 State.Host.HostState / 写 State.Chassis / RestartCause 对账</text>
+</svg>

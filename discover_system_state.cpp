@@ -215,6 +215,7 @@ int main(int argc, char** argv)
             {
                 if (!phosphor::state::manager::utils::checkACLoss(hostId))
                 {
+                    //BMC重启之前，服务器主机（Chassis）的电源并没有处于开启状态，所以不要执行任何进一步的电源恢复策略。
                     info(
                         "Chassis power was not on prior to BMC reboot so do not run any further power policy");
                     return 0;
