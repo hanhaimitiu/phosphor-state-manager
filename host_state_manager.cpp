@@ -224,12 +224,14 @@ bool Host::isAutoReboot()
                 // Generate log since we will now be sitting in Quiesce
                 const std::string errorMsg =
                     "xyz.openbmc_project.State.Error.HostQuiesce";
-                utils::createError(this->bus, errorMsg,
-                                   sdbusplus::xyz::openbmc_project::Logging::
-                                       server::Entry::Level::Critical);
+                auto logEntryPath = utils::createError(
+                    this->bus, errorMsg,
+                    sdbusplus::xyz::openbmc_project::Logging::server::Entry::
+                        Level::Critical);
 
-                // Generate BMC dump to assist with debug
-                utils::createBmcDump(this->bus);
+                // Generate BMC dump linked to the error log above so dreport
+                // collects the elog details
+                utils::createBmcDump(this->bus, logEntryPath);
 
                 return false;
             }
@@ -441,6 +443,21 @@ Host::ProgressStages Host::bootProgress(ProgressStages value)
                          .count();
     this->bootProgressLastUpdate(timeStamp);
     serialize();
+
+    // The RestartCause can be utilized by the host firmware to execute certain
+    // power restore polices. For example, if the RestartCause was a HostCrash
+    // then the host firmware may automatically restart certain virtual
+    // machines. Because of this, don't clear the RestartCause until the host
+    // has successfully booted up
+    if ((value == ProgressStages::SystemInitComplete ||
+         value == ProgressStages::OSRunning) &&
+        (server::Host::restartCause() != RestartCause::Unknown))
+    {
+        info("BootProgress reached {STAGE}, clearing RestartCause", "STAGE",
+             value);
+        server::Host::restartCause(RestartCause::Unknown);
+    }
+
     return retVal;
 }
 

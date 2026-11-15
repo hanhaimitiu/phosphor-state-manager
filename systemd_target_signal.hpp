@@ -78,9 +78,12 @@ class SystemdTargetLogging
      * @param[in]  error      - The error to log
      * @param[in]  result     - The failure code from the systemd unit
      * @param[in]  unit       - The name of the failed unit
+     *
+     * @return The D-Bus object path of the created log entry
      */
-    void logError(const std::string& error, const std::string& result,
-                  const std::string& unit);
+    sdbusplus::object_path logError(const std::string& error,
+                                    const std::string& result,
+                                    const std::string& unit);
 
     /** @brief Check if systemd state change is one to monitor
      *
@@ -105,10 +108,10 @@ class SystemdTargetLogging
     /** @brief Set up PropertiesChanged monitors for immediate-quiesce services
      *
      * For each service in immediateQuiesceServiceData, resolve its systemd
-     * unit object path via LoadUnit and install a PropertiesChanged
-     * match on the org.freedesktop.systemd1.Unit interface. When
-     * ActiveState becomes "failed", a BMC dump, error log, and quiesce
-     * are triggered immediately.
+     * unit object path via LoadUnit (concrete) or ListUnits+fnmatch (wildcard)
+     * and install a PropertiesChanged match on the
+     * org.freedesktop.systemd1.Unit interface. When ActiveState becomes
+     * "failed", a BMC dump, error log, and quiesce are triggered immediately.
      */
     void initImmediateQuiesceMonitoring();
 
@@ -120,11 +123,20 @@ class SystemdTargetLogging
     void processImmediateQuiesceStateChange(sdbusplus::message_t& msg,
                                             const std::string& unitName);
 
+    /** @brief Expand wildcard service and target entries via ListUnits.
+     *
+     *  Called once from subscribeToSystemdSignals() after Manager.Subscribe
+     *  succeeds. Wildcard entries (containing '*') are resolved by calling
+     *  Manager.ListUnits and filtering with fnmatch, then appending the
+     *  matching concrete unit names back into serviceData and targetData.
+     */
+    void expandServiceWildcards();
+
     /** @brief Systemd targets to monitor and error logs to create */
-    const TargetErrorData& targetData;
+    TargetErrorData targetData;
 
     /** @brief Systemd services to monitor for failure via JobRemoved */
-    const ServiceMonitorData& serviceData;
+    ServiceMonitorData serviceData;
 
     /** @brief Systemd services to monitor via ActiveState changes */
     const ImmediateQuiesceData& immediateQuiesceServiceData;

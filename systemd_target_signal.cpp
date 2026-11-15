@@ -2,6 +2,9 @@
 
 #include "utils.hpp"
 
+#include <fnmatch.h>
+
+#include <org/freedesktop/DBus/Error/event.hpp>
 #include <phosphor-logging/elog-errors.hpp>
 #include <phosphor-logging/lg2.hpp>
 #include <sdbusplus/exception.hpp>
@@ -11,10 +14,23 @@
 #include <xyz/openbmc_project/Logging/Entry/client.hpp>
 
 #include <string>
-#include <variant>
 
 namespace phosphor::state::manager
 {
+
+// Helper type for the ListUnits D-Bus reply tuple.
+using UnitInfo =
+    std::tuple<std::string,            // [0] name
+               std::string,            // [1] description
+               std::string,            // [2] load state
+               std::string,            // [3] active state
+               std::string,            // [4] sub state
+               std::string,            // [5] following
+               sdbusplus::object_path, // [6] object path
+               uint32_t,               // [7] job id
+               std::string,            // [8] job type
+               sdbusplus::object_path  // [9] job path
+               >;
 
 using phosphor::logging::elog;
 PHOSPHOR_LOG2_USING;
@@ -52,9 +68,9 @@ void SystemdTargetLogging::startBmcQuiesceTarget()
     return;
 }
 
-void SystemdTargetLogging::logError(const std::string& errorLog,
-                                    const std::string& result,
-                                    const std::string& unit)
+sdbusplus::object_path SystemdTargetLogging::logError(
+    const std::string& errorLog, const std::string& result,
+    const std::string& unit)
 {
     auto method = this->bus.new_method_call(
         LoggingCreate::default_service, LoggingCreate::instance_path,
@@ -67,7 +83,10 @@ void SystemdTargetLogging::logError(const std::string& errorLog,
              std::pair<std::string, std::string>({"SYSTEMD_UNIT", unit})}));
     try
     {
-        this->bus.call_noreply(method);
+        auto resp = this->bus.call(method);
+        sdbusplus::object_path entryPath;
+        resp.read(entryPath);
+        return entryPath;
     }
     catch (const sdbusplus::exception_t& e)
     {
@@ -75,42 +94,52 @@ void SystemdTargetLogging::logError(const std::string& errorLog,
               "result:{RESULT}, exception:{ERROR}",
               "ERROR_MSG", errorLog, "RESULT", result, "ERROR", e);
     }
+    return {};
 }
 
 std::string SystemdTargetLogging::processError(const std::string& unit,
                                                const std::string& result)
 {
-    auto targetEntry = this->targetData.find(unit);
-    if (targetEntry != this->targetData.end())
+    for (const auto& [pattern, target] : this->targetData)
     {
-        // Check if its result matches any of our monitored errors
-        if (std::find(targetEntry->second.errorsToMonitor.begin(),
-                      targetEntry->second.errorsToMonitor.end(), result) !=
-            targetEntry->second.errorsToMonitor.end())
+        if (fnmatch(pattern.c_str(), unit.c_str(), 0) != 0)
+        {
+            continue;
+        }
+
+        if (std::find(target.errorsToMonitor.begin(),
+                      target.errorsToMonitor.end(), result) !=
+            target.errorsToMonitor.end())
         {
             info(
                 "Monitored systemd unit has hit an error, unit:{UNIT}, result:{RESULT}",
                 "UNIT", unit, "RESULT", result);
 
-            // Generate a BMC dump when a monitored target fails
-            utils::createBmcDump(this->bus);
-            return (targetEntry->second.errorToLog);
+            // Return the error name to the caller. The log entry is created
+            // by logError() in systemdUnitChange(), and the BMC dump is
+            // created immediately after using the returned log entry object
+            // path so the dump is linked to the error log.
+            return (target.errorToLog);
         }
     }
 
-    // Check if it's in our list of services to monitor
-    if (std::find(this->serviceData.begin(), this->serviceData.end(), unit) !=
-        this->serviceData.end())
+    for (const auto& pattern : this->serviceData)
     {
+        if (fnmatch(pattern.c_str(), unit.c_str(), 0) != 0)
+        {
+            continue;
+        }
+
         if (result == "failed")
         {
             info(
                 "Monitored systemd service has hit an error, unit:{UNIT}, result:{RESULT}",
                 "UNIT", unit, "RESULT", result);
 
-            // Generate a BMC dump when a critical service fails
-            utils::createBmcDump(this->bus);
-            // Enter BMC Quiesce when a critical service fails
+            // Enter BMC Quiesce when a critical service fails. The log entry
+            // is created by logError() in systemdUnitChange(), and the BMC
+            // dump is created immediately after using the returned log entry
+            // object path so the dump is linked to the error log.
             startBmcQuiesceTarget();
             return std::string{CRITICAL_SERVICE_ERROR};
         }
@@ -133,10 +162,11 @@ void SystemdTargetLogging::systemdUnitChange(sdbusplus::message_t& msg)
     {
         const std::string error = processError(unit, result);
 
-        // If this is a monitored error then log it
+        // If this is a monitored error then log it and create a linked dump
         if (!error.empty())
         {
-            logError(error, result, unit);
+            auto logEntryPath = logError(error, result, unit);
+            utils::createBmcDump(this->bus, logEntryPath);
         }
     }
     return;
@@ -169,24 +199,24 @@ void SystemdTargetLogging::subscribeToSystemdSignals()
     {
         this->bus.call(method);
     }
-    catch (const sdbusplus::exception_t& e)
+    catch (
+        const sdbusplus::error::org::freedesktop::d_bus::Error::ServiceUnknown&
+            e)
     {
         // If error indicates systemd is not on dbus yet then do nothing.
         // The systemdNameChangeSignals callback will detect when it is on
         // dbus and then call this function again
-        const std::string noDbus("org.freedesktop.DBus.Error.ServiceUnknown");
-        if (noDbus == e.name())
-        {
-            info("org.freedesktop.systemd1 not on dbus yet");
-        }
-        else
-        {
-            error("Failed to subscribe to systemd signals: {ERROR}", "ERROR",
-                  e);
-            elog<InternalFailure>();
-        }
+        info("org.freedesktop.systemd1 not on dbus yet: {ERROR}", "ERROR", e);
         return;
     }
+    catch (const sdbusplus::exception_t& e)
+    {
+        error("Failed to subscribe to systemd signals: {ERROR}", "ERROR", e);
+        elog<InternalFailure>();
+        return;
+    }
+
+    expandServiceWildcards();
 
     // Call destructor on match callback since application is now subscribed to
     // systemd signals
@@ -196,6 +226,96 @@ void SystemdTargetLogging::subscribeToSystemdSignals()
     initImmediateQuiesceMonitoring();
 
     return;
+}
+
+void SystemdTargetLogging::expandServiceWildcards()
+{
+    std::vector<UnitInfo> units;
+    try
+    {
+        auto method =
+            this->bus.new_method_call(SYSTEMD_SERVICE, SYSTEMD_OBJ_PATH,
+                                      SYSTEMD_MANAGER_INTERFACE, "ListUnits");
+        auto reply = this->bus.call(method);
+        reply.read(units);
+    }
+    catch (const sdbusplus::exception_t& e)
+    {
+        error("expandServiceWildcards: ListUnits failed: {ERROR}", "ERROR", e);
+        return;
+    }
+
+    std::vector<std::pair<std::string, targetEntry>> targetsToAdd;
+    for (const auto& [pattern, entry] : this->targetData)
+    {
+        if (pattern.find('*') == std::string::npos)
+        {
+            continue;
+        }
+
+        bool matched = false;
+        for (const auto& unit : units)
+        {
+            const auto& unitName = std::get<0>(unit);
+            if (fnmatch(pattern.c_str(), unitName.c_str(), 0) != 0)
+            {
+                continue;
+            }
+
+            info(
+                "expandServiceWildcards: target wildcard {PATTERN} matched {UNIT}",
+                "PATTERN", pattern, "UNIT", unitName);
+            targetsToAdd.emplace_back(unitName, entry);
+            matched = true;
+        }
+
+        if (!matched)
+        {
+            info(
+                "expandServiceWildcards: no targets matched pattern {PATTERN} at init time",
+                "PATTERN", pattern);
+        }
+    }
+
+    for (const auto& [unitName, entry] : targetsToAdd)
+    {
+        this->targetData.emplace(unitName, entry);
+    }
+
+    std::vector<std::string> servicesToAdd;
+    for (const auto& pattern : this->serviceData)
+    {
+        if (pattern.find('*') == std::string::npos)
+        {
+            continue;
+        }
+
+        bool matched = false;
+        for (const auto& unit : units)
+        {
+            const auto& unitName = std::get<0>(unit);
+            if (fnmatch(pattern.c_str(), unitName.c_str(), 0) != 0)
+            {
+                continue;
+            }
+
+            info(
+                "expandServiceWildcards: service wildcard {PATTERN} matched {UNIT}",
+                "PATTERN", pattern, "UNIT", unitName);
+            servicesToAdd.push_back(unitName);
+            matched = true;
+        }
+
+        if (!matched)
+        {
+            info(
+                "expandServiceWildcards: no services matched pattern {PATTERN} at init time",
+                "PATTERN", pattern);
+        }
+    }
+
+    this->serviceData.insert(this->serviceData.end(), servicesToAdd.begin(),
+                             servicesToAdd.end());
 }
 
 void SystemdTargetLogging::initImmediateQuiesceMonitoring()
@@ -212,28 +332,29 @@ void SystemdTargetLogging::initImmediateQuiesceMonitoring()
         return;
     }
 
-    for (const auto& service : this->immediateQuiesceServiceData)
+    // Call ListUnits once up front so wildcard patterns can be expanded
+    // without a separate D-Bus call per pattern.
+    std::vector<UnitInfo> units;
+
+    try
     {
-        // Use LoadUnit to resolve the service name to a unit object path.
-        // LoadUnit will load the unit into memory if it isn't already.
         auto method =
             this->bus.new_method_call(SYSTEMD_SERVICE, SYSTEMD_OBJ_PATH,
-                                      SYSTEMD_MANAGER_INTERFACE, "LoadUnit");
-        method.append(service);
+                                      SYSTEMD_MANAGER_INTERFACE, "ListUnits");
+        auto reply = this->bus.call(method);
+        reply.read(units);
+    }
+    catch (const sdbusplus::exception_t& e)
+    {
+        error("initImmediateQuiesceMonitoring: ListUnits failed: {ERROR}",
+              "ERROR", e);
+        return;
+    }
 
-        sdbusplus::object_path unitPath;
-        try
-        {
-            unitPath = this->bus.call(method).unpack<sdbusplus::object_path>();
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            error("Failed to load unit for immediate-quiesce monitoring, "
-                  "unit:{UNIT}, error:{ERROR}",
-                  "UNIT", service, "ERROR", e);
-            continue;
-        }
-
+    // Helper: install a PropertiesChanged match for a resolved unit and check
+    // its current ActiveState to close the startup race window.
+    auto installAndCheck = [this](const std::string& service,
+                                  const sdbusplus::object_path& unitPath) {
         // Install a PropertiesChanged match on this unit's
         // org.freedesktop.systemd1.Unit interface
         auto matchRule = sdbusplus::match_rules::propertiesChanged(
@@ -264,8 +385,9 @@ void SystemdTargetLogging::initImmediateQuiesceMonitoring()
                 info("Immediate-quiesce service already in failed state "
                      "at monitor startup, unit:{UNIT}, result:{RESULT}",
                      "UNIT", service, "RESULT", *stateStr);
-                utils::createBmcDump(this->bus);
-                logError(CRITICAL_SERVICE_ERROR, *stateStr, service);
+                auto logEntryPath =
+                    logError(CRITICAL_SERVICE_ERROR, *stateStr, service);
+                utils::createBmcDump(this->bus, logEntryPath);
                 startBmcQuiesceTarget();
             }
         }
@@ -274,6 +396,65 @@ void SystemdTargetLogging::initImmediateQuiesceMonitoring()
             error("Failed to read current ActiveState for unit:{UNIT}, "
                   "error:{ERROR}",
                   "UNIT", service, "ERROR", e);
+        }
+    };
+
+    for (const auto& pattern : this->immediateQuiesceServiceData)
+    {
+        const bool isWildcard = (pattern.find('*') != std::string::npos);
+
+        if (isWildcard)
+        {
+            // Wildcard: expand against the ListUnits snapshot.
+            // Known limitation: ListUnits only returns currently loaded units,
+            // so wildcard targets not yet loaded at monitor start (e.g. those
+            // triggered during a host boot) will not be caught here. They will
+            // still be detected via processError, but will not trigger
+            // immediate quiesce.
+            bool matched = false;
+            for (const auto& u : units)
+            {
+                const auto& uName = std::get<0>(u);
+                const auto& uPath = std::get<6>(u);
+                if (fnmatch(pattern.c_str(), uName.c_str(), 0) == 0)
+                {
+                    info("Immediate-quiesce wildcard {PATTERN} matched {UNIT}",
+                         "PATTERN", pattern, "UNIT", uName);
+                    installAndCheck(uName, uPath);
+                    matched = true;
+                }
+            }
+            if (!matched)
+            {
+                info("initImmediateQuiesceMonitoring: no units matched pattern "
+                     "{PATTERN} at init time",
+                     "PATTERN", pattern);
+            }
+        }
+        else
+        {
+            // Use LoadUnit to resolve the service name to a unit object path.
+            // LoadUnit will load the unit into memory if it isn't already.
+            auto method = this->bus.new_method_call(
+                SYSTEMD_SERVICE, SYSTEMD_OBJ_PATH, SYSTEMD_MANAGER_INTERFACE,
+                "LoadUnit");
+            method.append(pattern);
+
+            sdbusplus::object_path unitPath;
+            try
+            {
+                unitPath =
+                    this->bus.call(method).unpack<sdbusplus::object_path>();
+            }
+            catch (const sdbusplus::exception_t& e)
+            {
+                error("Failed to load unit for immediate-quiesce monitoring, "
+                      "unit:{UNIT}, error:{ERROR}",
+                      "UNIT", pattern, "ERROR", e);
+                continue;
+            }
+
+            installAndCheck(pattern, unitPath);
         }
     }
 
@@ -322,11 +503,10 @@ void SystemdTargetLogging::processImmediateQuiesceStateChange(
          "unit:{UNIT}, result:{RESULT}",
          "UNIT", unitName, "RESULT", *activeStatePtr);
 
-    // Generate a BMC dump when an immediate-quiesce service fails
-    utils::createBmcDump(this->bus);
-
-    // Log the error
-    logError(CRITICAL_SERVICE_ERROR, *activeStatePtr, unitName);
+    // Log the error and create a BMC dump linked to it
+    auto logEntryPath =
+        logError(CRITICAL_SERVICE_ERROR, *activeStatePtr, unitName);
+    utils::createBmcDump(this->bus, logEntryPath);
 
     // Enter BMC Quiesce
     startBmcQuiesceTarget();

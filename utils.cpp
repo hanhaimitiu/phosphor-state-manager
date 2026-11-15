@@ -6,6 +6,7 @@
 
 #include <phosphor-logging/lg2.hpp>
 #include <xyz/openbmc_project/Dump/Create/client.hpp>
+#include <xyz/openbmc_project/Dump/Create/common.hpp>
 #include <xyz/openbmc_project/Logging/Create/client.hpp>
 #include <xyz/openbmc_project/ObjectMapper/client.hpp>
 #include <xyz/openbmc_project/Software/ActivationBlocksTransition/client.hpp>
@@ -124,15 +125,14 @@ std::string getProperty(sdbusplus::bus_t& bus, const std::string& path,
 
 void setProperty(sdbusplus::bus_t& bus, const std::string& path,
                  const std::string& interface, const std::string& property,
-                 const std::string& value)
+                 const std::variant<bool, std::string>& value)
 {
-    std::variant<std::string> variantValue = value;
     std::string service = getService(bus, path, interface);
 
     auto method = bus.new_method_call(service.c_str(), path.c_str(),
                                       PROPERTY_INTERFACE, "Set");
 
-    method.append(interface, property, variantValue);
+    method.append(interface, property, value);
     try
     {
         bus.call_noreply(method);
@@ -145,8 +145,6 @@ void setProperty(sdbusplus::bus_t& bus, const std::string& path,
               "ERROR", e);
         throw;
     }
-
-    return;
 }
 
 int getGpioValue(const std::string& gpioName)
@@ -173,7 +171,7 @@ int getGpioValue(const std::string& gpioName)
     return gpioval;
 }
 
-void createError(
+sdbusplus::object_path createError(
     sdbusplus::bus_t& bus, const std::string& errorMsg,
     sdbusplus::server::xyz::openbmc_project::logging::Entry::Level errLevel,
     std::map<std::string, std::string> additionalData)
@@ -192,6 +190,10 @@ void createError(
 
         method.append(errorMsg, errLevel, additionalData);
         auto resp = bus.call(method);
+
+        sdbusplus::object_path entryPath;
+        resp.read(entryPath);
+        return entryPath;
     }
     catch (const sdbusplus::exception_t& e)
     {
@@ -209,18 +211,32 @@ void createError(
     }
 }
 
-void createBmcDump(sdbusplus::bus_t& bus)
+void createBmcDump(sdbusplus::bus_t& bus,
+                   const sdbusplus::object_path& objectPath)
 {
     using DumpCreate = sdbusplus::client::xyz::openbmc_project::dump::Create<>;
+    using DumpIntr = sdbusplus::common::xyz::openbmc_project::dump::Create;
+    using CreateParameters = DumpIntr::CreateParameters;
+
     auto dumpPath = sdbusplus::object_path(DumpCreate::namespace_path::value) /
                     DumpCreate::namespace_path::bmc;
 
     auto method = bus.new_method_call(DumpCreate::default_service, dumpPath,
                                       DumpCreate::interface,
                                       DumpCreate::method_names::create_dump);
-    method.append(
-        std::vector<
-            std::pair<std::string, std::variant<std::string, uint64_t>>>());
+
+    // Pass the log entry object path as EventId — the dump manager extracts
+    // this into dreport -p, and the dreport metadata plugin uses it to collect
+    // the full details inside the dump archive.
+    std::vector<std::pair<std::string, std::variant<std::string, uint64_t>>>
+        params;
+    if (!objectPath.str.empty())
+    {
+        params.emplace_back(DumpIntr::convertCreateParametersToString(
+                                CreateParameters::EventId),
+                            objectPath);
+    }
+    method.append(params);
     try
     {
         bus.call_noreply(method);

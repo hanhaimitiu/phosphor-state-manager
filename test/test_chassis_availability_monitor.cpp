@@ -1,0 +1,409 @@
+#include "chassis_availability_monitor.hpp"
+
+#include <nlohmann/json.hpp>
+#include <sdbusplus/bus.hpp>
+
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+
+#include <gtest/gtest.h>
+
+namespace phosphor::state::manager
+{
+
+using json = nlohmann::json;
+
+class ChassisAvailabilityTest : public ::testing::Test
+{
+  protected:
+    sdbusplus::bus_t bus = sdbusplus::bus::new_default();
+    std::filesystem::path testDir;
+    std::filesystem::path testFile;
+
+    void createTestConfig(const json& config, const std::string& filename)
+    {
+        char tmpDir[] = "/tmp/test_chassis_availability_monitor_XXXXXX";
+        ASSERT_NE(mkdtemp(tmpDir), nullptr);
+
+        testDir = std::filesystem::path(tmpDir);
+        testFile = testDir / filename;
+
+        std::ofstream stream(testFile);
+        ASSERT_TRUE(stream.is_open());
+        stream << config;
+    }
+
+    void TearDown() override
+    {
+        if (!testDir.empty())
+        {
+            std::filesystem::remove_all(testDir);
+        }
+    }
+};
+
+TEST_F(ChassisAvailabilityTest, BasicGoodPath)
+{
+    auto validConfig = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                },
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface":
+                        "xyz.openbmc_project.State.Decorator.PowerSystemInputs",
+                    "property": "Status",
+                    "availableValue":
+                        "xyz.openbmc_project.State.Decorator.PowerSystemInputs.Status.Good"
+                },
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Common.Progress",
+                    "property": "PercentComplete",
+                    "availableValue": 100
+                }
+            ]
+        }
+    )"_json;
+
+    createTestConfig(validConfig, "chassis_availability_good.json");
+
+    // Constructor will throw an error without ObjectMapper present
+    // This is expected, just verify that config loads correctly
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 sdbusplus::internal_exception_t);
+}
+
+TEST_F(ChassisAvailabilityTest, MissingAvailableObjectPath)
+{
+    auto missingPath = R"(
+        {
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ]
+        }
+    )"_json;
+
+    createTestConfig(missingPath, "chassis_availability_missing_path.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile), std::exception);
+}
+
+TEST_F(ChassisAvailabilityTest, InvalidAvailableValueType)
+{
+    auto invalidType = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": ["invalid", "array", "type"]
+                }
+            ]
+        }
+    )"_json;
+
+    createTestConfig(invalidType, "chassis_availability_invalid_type.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, InvalidJsonFormat)
+{
+    testFile = "/tmp/chassis_availability_invalid_json.json";
+    std::ofstream stream(testFile);
+    ASSERT_TRUE(stream.is_open());
+    stream << R"({"availableObjectPath":"missing closing brace")";
+    stream.close();
+
+    // Exception thrown on malformed JSON
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 nlohmann::detail::parse_error);
+}
+
+TEST_F(ChassisAvailabilityTest, FileNotFound)
+{
+    testFile = "/tmp/nonexistent.json";
+
+    // Exception thrown when config file doesn't exist
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::runtime_error);
+}
+
+TEST_F(ChassisAvailabilityTest, ConditionOverridesGoodPath)
+{
+    auto validOverrideConfig = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                },
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface":
+                        "xyz.openbmc_project.State.Decorator.PowerSystemInputs",
+                    "property": "Status",
+                    "availableValue":
+                        "xyz.openbmc_project.State.Decorator.PowerSystemInputs.Status.Good"
+                }
+            ],
+            "conditionOverrides": {
+                "0": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis0",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": true
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(validOverrideConfig,
+                     "chassis_availability_overrides_good.json");
+
+    // Constructor will throw an error without ObjectMapper present
+    // This is expected, just verify that config loads correctly
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 sdbusplus::internal_exception_t);
+}
+
+TEST_F(ChassisAvailabilityTest, PlaceholderInConditionOverridePath)
+{
+    auto placeholderOverride = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "0": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis<N>",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": true
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(placeholderOverride,
+                     "chassis_availability_placeholder_override.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, InvalidAvailableValueTypeInOverride)
+{
+    auto invalidOverrideType = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "0": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis0",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": ["invalid", "array", "type"]
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(invalidOverrideType,
+                     "chassis_availability_invalid_override_type.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, EmptyConditionOverridesList)
+{
+    auto emptyOverride = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "1": []
+            }
+        }
+    )"_json;
+
+    createTestConfig(emptyOverride, "chassis_availability_empty_override.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, OutOfRangeConditionOverrideKey)
+{
+    auto outOfRangeKey = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "256": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis256",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": true
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(outOfRangeKey,
+                     "chassis_availability_out_of_range_key.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, NonNumericConditionOverrideKey)
+{
+    auto nonNumericKey = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "chassis0": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis0",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": true
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(nonNumericKey,
+                     "chassis_availability_non_numeric_key.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+TEST_F(ChassisAvailabilityTest, TrailingCharactersInConditionOverrideKey)
+{
+    auto trailingCharsOverride = R"(
+        {
+            "availableObjectPath":
+                "/xyz/openbmc_project/inventory/system/chassis<N>",
+            "conditions": [
+                {
+                    "baseObjectPath":
+                        "/xyz/openbmc_project/inventory/system/chassis<N>",
+                    "interface": "xyz.openbmc_project.Inventory.Item",
+                    "property": "Present",
+                    "availableValue": true
+                }
+            ],
+            "conditionOverrides": {
+                "0invalid": [
+                    {
+                        "baseObjectPath":
+                            "/xyz/openbmc_project/inventory/system/chassis0",
+                        "interface": "xyz.openbmc_project.Inventory.Item",
+                        "property": "Present",
+                        "availableValue": true
+                    }
+                ]
+            }
+        }
+    )"_json;
+
+    createTestConfig(trailingCharsOverride,
+                     "chassis_availability_trailing_chars_override.json");
+
+    EXPECT_THROW(ChassisAvailability monitor(bus, testFile),
+                 std::invalid_argument);
+}
+
+} // namespace phosphor::state::manager
