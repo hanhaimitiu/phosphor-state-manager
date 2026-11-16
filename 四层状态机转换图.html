@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phosphor-state-manager 四层状态机转换图</title>
+<style>
+  :root{
+    --bg:#faf8f4; --paper:#ffffff; --line:#d8d2c7;
+    --ink:#2d2a27; --ink2:#5c5650; --ink3:#8a8378;
+    --accent:#3f6b78; --accent-deep:#2c525c; --accent-pale:#e3ecee;
+    --warm:#f4f1ea; --warm-line:#b9a98f;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;line-height:1.6;}
+  .wrap{max-width:1240px;margin:0 auto;padding:28px 22px 60px;}
+  header h1{margin:0 0 6px;font-size:22px;font-weight:700;}
+  header .sub{color:var(--ink2);margin:0 0 4px;}
+  .lead{background:var(--paper);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:6px;padding:12px 16px;margin:16px 0 20px;color:var(--ink2);}
+  .lead b{color:var(--ink);}
+  .lead code{background:var(--warm);padding:1px 5px;border-radius:4px;color:var(--accent-deep);}
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+  .toolbar button{font:inherit;font-size:13px;color:var(--ink2);background:var(--paper);
+    border:1px solid var(--line);border-radius:6px;padding:6px 14px;cursor:pointer;transition:.15s;}
+  .toolbar button:hover{border-color:var(--accent);color:var(--accent-deep);}
+  .toolbar button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .toolbar button.reset{margin-left:auto;color:var(--ink3);}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--ink2);margin-bottom:8px;}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;}
+  .graph-wrap{background:var(--paper);border:1px solid var(--line);border-radius:6px;overflow:hidden;}
+  svg{display:block;width:100%;height:auto;user-select:none;-webkit-user-select:none;touch-action:none;}
+  .band{fill:#fbfaf7;stroke:var(--line);stroke-width:1;stroke-dasharray:4 4;}
+  .band-t{font-size:13px;font-weight:700;fill:var(--ink3);}
+  .edge path{fill:none;stroke:#9aabad;stroke-width:1.5;transition:stroke .15s,stroke-width .15s,opacity .15s;}
+  .edge path.hit{stroke:transparent;stroke-width:16;cursor:grab;}
+  .edge.hl path:not(.hit){stroke:var(--accent-deep);stroke-width:2.8;}
+  .edge.dim{opacity:.08;}
+  .edge text{font-size:10px;fill:var(--ink2);paint-order:stroke;stroke:var(--paper);stroke-width:3px;
+    stroke-linejoin:round;cursor:grab;}
+  .edge.hl text{fill:var(--accent-deep);font-weight:700;}
+  svg.dragging .edge path.hit,svg.dragging .edge text{cursor:grabbing;}
+  .node{cursor:grab;-webkit-user-drag:none;}
+  .node rect{stroke-width:1.6;transition:stroke .15s,stroke-width .15s;}
+  .node:hover rect,.node.sel rect{stroke:var(--accent-deep);stroke-width:2.6;}
+  .node.dim{opacity:.22;}
+  .node .nl{font-size:12px;font-weight:700;text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
+  svg.dragging .node{cursor:grabbing;}
+  .k-bmc rect{fill:#eef3f4;stroke:#6a949c;}      .k-bmc .nl{fill:var(--ink);}
+  .k-chassis rect{fill:#f7f0e4;stroke:#b99a5f;}  .k-chassis .nl{fill:var(--ink);}
+  .k-host rect{fill:var(--accent);stroke:var(--accent-deep);}  .k-host .nl{fill:#fff;}
+  .k-hostoff rect{fill:#e3ecee;stroke:var(--accent-deep);}     .k-hostoff .nl{fill:var(--ink);}
+  .k-hyper rect{fill:#f2eef5;stroke:#9480a8;stroke-dasharray:5 3;} .k-hyper .nl{fill:var(--ink);}
+  .detail{margin-top:22px;background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:18px 20px;min-height:120px;}
+  .detail h2{margin:0 0 4px;font-size:17px;}
+  .detail .desc{color:var(--ink2);margin:0 0 14px;}
+  .detail table{border-collapse:collapse;width:100%;font-size:13px;}
+  .detail th,.detail td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top;}
+  .detail th{color:var(--ink2);font-weight:600;font-size:12px;border-bottom:2px solid var(--line);}
+  .detail .ev{font-family:Consolas,Monaco,monospace;color:var(--accent-deep);white-space:nowrap;}
+  .detail .to{font-weight:600;color:var(--ink);white-space:nowrap;}
+  .detail .ln{font-family:Consolas,Monaco,monospace;color:var(--ink3);white-space:nowrap;font-size:12px;}
+  .detail .cond{color:#a86a4c;font-size:12px;}
+  .detail tr.selrow{background:#f0f5f6;}
+  .foot{margin-top:20px;color:var(--ink3);font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>phosphor-state-manager 四层状态机转换图</h1>
+    <p class="sub">从真实源码提取：BMC / Chassis / Host / Hypervisor 四层状态与转换事件（每条带 file:line）。</p>
+  </header>
+
+  <div class="lead">
+    先记住一条开机主线：<b>BMC Ready → Chassis On（电通）→ Host Running（OS 起）</b>。
+    图中<b>实色节点是状态</b>，<b>虚线节点是 boot progress 事件源</b>（Hypervisor 层）。
+    <b>节点可拖、连线也可拖</b>——线重叠时按住线或它的事件标签拖一下就能弯开（自环可上下拖）。
+    <b>点任一状态或转换</b>，下方列出源码行号和业务说明。按上方按钮只看某一层。
+  </div>
+
+  <div class="toolbar" id="toolbar"></div>
+  <div class="legend">
+    <span><i style="background:#eef3f4;border:1px solid #6a949c"></i>BMC 层</span>
+    <span><i style="background:#f7f0e4;border:1px solid #b99a5f"></i>Chassis 层（电源域）</span>
+    <span><i style="background:#3f6b78"></i>Host 层（计算域，深=Running 类）</span>
+    <span><i style="background:#e3ecee;border:1px solid #2c525c"></i>Host 层（Off 类）</span>
+    <span><i style="background:#f2eef5;border:1px dashed #9480a8"></i>Hypervisor 层（boot progress）</span>
+  </div>
+
+  <div class="graph-wrap"><svg id="graph" viewBox="0 0 1120 900"></svg></div>
+  <div class="detail" id="detail"></div>
+
+  <p class="foot">数据来源：bmc_state_manager.cpp(:112/:139/:247)、chassis_state_manager.cpp(:59/:530/:584)、
+    host_state_manager.cpp(:51/:91/:269/:390)、hypervisor_state_manager.cpp(:63)。状态枚举取自 sdbusplus 生成的
+    State.* 接口（YAML 定义在 phosphor-dbus-interfaces）。</p>
+</div>
+
+<script>
+// ===== 节点初始布局（id → 位置/文案/层）=====
+const INIT = {
+  bmcNotReady:   {label:'NotReady',      full:'BMC · NotReady',      desc:'BMC 还在启动、没进 multi-user.target。此时默认拒绝开机请求。', x:130, y:150, kind:'bmc'},
+  bmcReady:      {label:'Ready',         full:'BMC · Ready',         desc:'BMC 管理层就绪，可以接受开机等请求。是 Host 开机的门槛（ONLY_ALLOW_BOOT_WHEN_BMC_READY）。', x:130, y:330, kind:'bmc'},
+  bmcQuiesced:   {label:'Quiesced',      full:'BMC · Quiesced',      desc:'BMC 进入静态管理状态（obmc-bmc-service-quiesce@0.target active），停止正常服务、对外告警。', x:130, y:510, kind:'bmc'},
+
+  chassisOff:    {label:'Off',           full:'Chassis · Off',       desc:'机箱电源域断电（S5 待机）。注意：此时 BMC 仍带电。', x:430, y:190, kind:'chassis'},
+  chassisOn:     {label:'On',            full:'Chassis · On',        desc:'机箱已上电（电通了），但 OS 未必在跑——Host 才是计算域。', x:430, y:390, kind:'chassis'},
+
+  hostOff:       {label:'Off',           full:'Host · Off',          desc:'主机未运行（OS 没起）。可能电已通（S5）也可能没通，取决于 Chassis。', x:720, y:600, kind:'hostoff'},
+  hostRunning:   {label:'Running',       full:'Host · Running',      desc:'主机 OS 正常运行——Web/Redfish 上看到的"服务器开机"就是这个状态。', x:990, y:600, kind:'host'},
+  hostQuiesced:  {label:'Quiesced',      full:'Host · Quiesced',     desc:'主机异常后的停摆态：怀疑反复崩溃，先不再重启，等人来处理。', x:990, y:770, kind:'hostoff'},
+  hostDiagnostic:{label:'DiagnosticMode',full:'Host · DiagnosticMode',desc:'诊断模式（obmc-host-diagnostic-mode@N.target），用于固件调试。', x:700, y:770, kind:'hostoff'},
+  hostStandby:   {label:'Standby',       full:'Host · Standby',      desc:'Hypervisor 层看到 SystemInitComplete 后置位：虚拟化固件已起、还没到 OS。', x:855, y:430, kind:'hostoff'},
+
+  progUnspecified:{label:'Unspecified',  full:'boot progress · Unspecified', desc:'boot 进度未定义 → 推导 Host 为 Off，并发 Halt 类 transition。', x:380, y:640, kind:'hyper'},
+  progSystemInit: {label:'SystemInitComplete', full:'boot progress · SystemInitComplete', desc:'系统初始化完成 → Hypervisor 把 Host 状态置为 Standby。', x:390, y:760, kind:'hyper'},
+  progOSRunning:  {label:'OSRunning',    full:'boot progress · OSRunning', desc:'OS 已在运行 → Hypervisor 把 Host 状态置为 Running。', x:560, y:850, kind:'hyper'},
+};
+const STATES = JSON.parse(JSON.stringify(INIT));
+const NW = 150, NH = 46, VB_W = 1120, VB_H = 900;
+
+// ===== 转换边（f=源, e=触发事件, t=目标, g=层过滤, ln=源码行, note=业务说明）=====
+const T = [
+  // BMC 层
+  {f:'bmcNotReady', e:'发现:multi-user.target active', t:'bmcReady', g:'bmc', ln:124, note:'BMC 启动时发现 multi-user.target 已激活 → 置 Ready。'},
+  {f:'bmcReady', e:'HardReboot 请求', t:'bmcNotReady', g:'bmc', ln:150, note:'发起 BMC 硬重启：先置 NotReady、停掉状态监听，让 Redfish 客户端停止通信，再调 systemd Reboot。'},
+  {f:'bmcReady', e:'quiesce target active', t:'bmcQuiesced', g:'bmc', ln:115, note:'发现 quiesce target 激活 → BMC 进入 Quiesced。'},
+  {f:'bmcQuiesced', e:'重启后重新发现', t:'bmcReady', g:'bmc', ln:112, note:'BMC 重启后重新探测：quiesce 不在、multi-user 在 → 回到 Ready。'},
+  // Chassis 层
+  {f:'chassisOff', e:'PowerTransition=On 完成', t:'chassisOn', g:'chassis', ln:560, note:'poweron target 的 JobRemoved=done → 回填 CurrentPowerState=On，并记录状态变更时间。'},
+  {f:'chassisOn', e:'PowerTransition=Off 完成', t:'chassisOff', g:'chassis', ln:552, note:'poweroff target 的 JobRemoved=done → 回填 CurrentPowerState=Off。'},
+  {f:'chassisOn', e:'PowerCycle', t:'chassisOn', g:'chassis', ln:65, self:true, note:'电源循环：拉 obmc-chassis-powercycle@N.target，先断后通，最终仍回到 On。'},
+  // Host 层
+  {f:'hostOff', e:'HostTransition=On 完成', t:'hostRunning', g:'host', ln:288, note:'startmin target 的 JobRemoved=done → 回填 CurrentHostState=Running，清 bootProgress/OSStatus。'},
+  {f:'hostRunning', e:'HostTransition=Off 完成', t:'hostOff', g:'host', ln:279, note:'host stop target 完成 → CurrentHostState=Off，清 bootProgress、OS 状态、删 running 标志文件。'},
+  {f:'hostRunning', e:'quiesce target 完成', t:'hostQuiesced', g:'host', ln:302, note:'host quiesce target 完成 → 若 AutoReboot 为真则再发 Reboot，否则维持 Quiesced。'},
+  {f:'hostQuiesced', e:'AutoReboot → Reboot', t:'hostRunning', g:'host', ln:306, note:'quiesce 回调里若 AutoReboot 开启 → 自动再请求 Reboot，尝试恢复。'},
+  {f:'hostOff', e:'DiagnosticMode target', t:'hostDiagnostic', g:'host', ln:328, note:'JobNew 看到 diagnostic-mode target → CurrentHostState=DiagnosticMode。'},
+  {f:'hostRunning', e:'DiagnosticMode target', t:'hostDiagnostic', g:'host', ln:328, note:'运行中也可进诊断模式（同上 JobNew 分支）。'},
+  {f:'hostDiagnostic', e:'stop target 完成', t:'hostOff', g:'host', ln:279, note:'诊断模式收到 stop target 完成 → 回到 Off。'},
+  // Hypervisor 层（boot progress 驱动 Host 状态）
+  {f:'progSystemInit', e:'SystemInitComplete', t:'hostStandby', g:'hyper', ln:63, note:'hypervisor 监听 boot progress：SystemInitComplete → 把 Host 状态置 Standby。'},
+  {f:'progOSRunning', e:'OSRunning', t:'hostRunning', g:'hyper', ln:68, note:'boot progress 到 OSRunning → 把 Host 状态置 Running。'},
+  {f:'progUnspecified', e:'Unspecified', t:'hostOff', g:'hyper', ln:73, note:'boot progress 回到 Unspecified → Host 置 Off 并发 Off transition。'},
+  {f:'hostStandby', e:'OSRunning(继续)', t:'hostRunning', g:'hyper', ln:71, note:'Standby 之后 OS 起来 → 继续推进到 Running。'},
+];
+
+const GROUPS = [
+  {id:'all',name:'全部（四层）'}, {id:'bmc',name:'BMC 层'}, {id:'chassis',name:'Chassis 层'},
+  {id:'host',name:'Host 层'}, {id:'hyper',name:'Hypervisor 层'},
+];
+
+const svg = document.getElementById('graph');
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag,attrs,parent)=>{const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);if(parent)parent.appendChild(n);return n;};
+let currentGroup='all', selected=null, selectedEdge=null;
+let nodeEls={}, edgeEls=[];
+let dragging=null, draggingEdge=null, dragOff={x:0,y:0}, moved=false, downClient={x:0,y:0}, edgeDragBase=null;
+
+const HAS_POINTER = ('PointerEvent' in window);
+function hashCurve(s){let h=0;for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0;return ((h%7)-3)*15;}
+function rectPoint(s,toward){
+  const dx=toward.x-s.x, dy=toward.y-s.y;
+  if(Math.abs(dx)<1e-6&&Math.abs(dy)<1e-6)return {x:s.x,y:s.y};
+  const tx=(NW/2+4)/Math.abs(dx||1e-6), ty=(NH/2+4)/Math.abs(dy||1e-6), t=Math.min(tx,ty);
+  return {x:s.x+dx*t,y:s.y+dy*t};
+}
+function edgeGeom(t){
+  const s=STATES[t.f], e=STATES[t.t];
+  if(t.self){
+    const h=t.selfH||96;
+    return {d:'M '+(s.x-26)+' '+(s.y-NH/2)+' C '+(s.x-70)+' '+(s.y-h)+', '+(s.x+70)+' '+(s.y-h)+', '+(s.x+26)+' '+(s.y-NH/2), lx:s.x, ly:s.y-h+2};
+  }
+  const len=Math.hypot(e.x-s.x,e.y-s.y)||1;
+  const curve=(t.uc!==undefined?t.uc:hashCurve(t.f+'>'+t.t+t.e)*Math.min(1,len/240));
+  const p1=rectPoint(s,e), p2=rectPoint(e,s);
+  const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+  const nx=-(p2.y-p1.y)/len, ny=(p2.x-p1.x)/len;
+  const cx=mx+nx*curve, cy=my+ny*curve;
+  return {d:'M '+p1.x+' '+p1.y+' Q '+cx+' '+cy+' '+p2.x+' '+p2.y, lx:(p1.x+2*cx+p2.x)/4, ly:(p1.y+2*cy+p2.y)/4};
+}
+function updatePositions(){
+  for(const id in nodeEls){
+    const s=STATES[id], n=nodeEls[id];
+    n.rect.setAttribute('x',s.x-NW/2); n.rect.setAttribute('y',s.y-NH/2);
+    n.text.setAttribute('x',s.x);     n.text.setAttribute('y',s.y);
+  }
+  for(const it of edgeEls){
+    const g=edgeGeom(it.t);
+    it.path.setAttribute('d',g.d);
+    if(it.hit)it.hit.setAttribute('d',g.d);
+    if(it.text){it.text.setAttribute('x',g.lx);it.text.setAttribute('y',g.ly);}
+  }
+}
+function visibleEdges(){return currentGroup==='all'?T:T.filter(t=>t.g===currentGroup);}
+function visibleStateIds(){
+  if(currentGroup==='all')return Object.keys(STATES);
+  const ids=new Set();T.filter(t=>t.g===currentGroup).forEach(t=>{ids.add(t.f);ids.add(t.t);});return [...ids];
+}
+function detailForState(id){
+  const s=STATES[id];
+  const out=T.filter(t=>t.f===id), inn=T.filter(t=>t.t===id);
+  const rows=(arr,dir)=>arr.map(t=>{
+    const target=dir==='out'?STATES[t.t].full:STATES[t.f].full;
+    return '<tr'+(selectedEdge===t?' class="selrow"':'')+'>'+
+      '<td class="ev">'+t.e+'</td>'+
+      '<td>'+(dir==='out'?'→':'←')+' <span class="to">'+target+'</span>'+(t.cond?' <span class="cond">['+t.cond+']</span>':'')+'</td>'+
+      '<td class="ln">:'+t.ln+'</td><td>'+t.note+'</td></tr>';
+  }).join('');
+  return '<h2>'+s.full+'</h2><p class="desc">'+s.desc+'</p>'+
+    '<table><thead><tr><th>事件</th><th>转换</th><th>代码行</th><th>业务说明</th></tr></thead><tbody>'+
+    (out.length?'<tr><td colspan="4" style="color:#8a8378;font-size:12px">■ 出边（本状态下收到事件后）</td></tr>'+rows(out,'out'):'')+
+    (inn.length?'<tr><td colspan="4" style="color:#8a8378;font-size:12px">■ 入边（从哪些状态转进来）</td></tr>'+rows(inn,'in'):'')+
+    '</tbody></table>';
+}
+function detailForEdge(t){
+  return '<h2>转换：'+STATES[t.f].full+' → '+STATES[t.t].full+'</h2>'+
+    '<p class="desc">触发事件 <span class="ev">'+t.e+'</span>　源码行 <span class="ln">'+srcFile(t)+':'+t.ln+'</span>'+(t.cond?'　<span class="cond">条件：'+t.cond+'</span>':'')+'</p>'+
+    '<table><thead><tr><th>源状态</th><th>事件</th><th>目标状态</th><th>源码行</th><th>业务说明</th></tr></thead><tbody>'+
+    '<tr class="selrow"><td>'+STATES[t.f].full+'</td><td class="ev">'+t.e+'</td><td class="to">'+STATES[t.t].full+'</td><td class="ln">:'+t.ln+'</td><td>'+t.note+'</td></tr>'+
+    '</tbody></table>';
+}
+function srcFile(t){
+  if(t.g==='bmc')return 'bmc_state_manager.cpp';
+  if(t.g==='chassis')return 'chassis_state_manager.cpp';
+  if(t.g==='hyper')return 'hypervisor_state_manager.cpp';
+  return 'host_state_manager.cpp';
+}
+function renderDetail(){
+  const d=document.getElementById('detail');
+  if(selectedEdge){d.innerHTML=detailForEdge(selectedEdge);return;}
+  if(selected){d.innerHTML=detailForState(selected);return;}
+  d.innerHTML='<h2>状态详情</h2><p class="desc">点图中任意<b>状态</b>看它的全部转换；点任意<b>转换线/事件标签</b>看那一条的源码行号和业务说明。节点和线都可直接拖动来理清重叠。</p>';
+}
+function render(){
+  svg.innerHTML=''; nodeEls={}; edgeEls=[];
+  // 分层背景带（仅"全部"视图）
+  if(currentGroup==='all'){
+    const bands=[
+      {x:20,y:95,w:230,h:480,t:'BMC 层'},
+      {x:320,y:120,w:230,h:430,t:'CHASSIS 层'},
+      {x:620,y:360,w:470,h:480,t:'HOST 层'},
+      {x:320,y:610,w:270,h:270,t:'HYPERVISOR 层'},
+    ];
+    bands.forEach(b=>{
+      el('rect',{class:'band',x:b.x,y:b.y,width:b.w,height:b.h,rx:8},svg);
+      const tt=el('text',{class:'band-t',x:b.x+12,y:b.y+22},svg);tt.textContent=b.t;
+    });
+  }
+  const defs=el('defs',{},svg);
+  [['arw','#9aabad'],['arwH','#2c525c']].forEach(([id,fill])=>{
+    const mk=el('marker',{id,viewBox:'0 0 10 10',refX:'9',refY:'5',markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'},defs);
+    el('path',{d:'M 0 1 L 9 5 L 0 9 z',fill},mk);
+  });
+  const gEdges=el('g',{},svg), gNodes=el('g',{},svg);
+  visibleEdges().forEach(t=>{
+    const g=el('g',{class:'edge'},gEdges);
+    const path=el('path',{'marker-end':'url(#arw)'},g);
+    const hit=el('path',{class:'hit'},g);
+    const text=el('text',{'text-anchor':'middle'},g);
+    text.textContent=t.e;
+    const title=el('title',{},g);
+    title.textContent=t.e+' → '+STATES[t.t].full+'  ('+srcFile(t)+':'+t.ln+')\n'+t.note+'\n（可拖动线/标签来避开重叠）';
+    const item={g,path,hit,text,t};
+    if(HAS_POINTER){
+      hit.addEventListener('pointerdown',e=>startEdgeDrag(e,item));
+      text.addEventListener('pointerdown',e=>startEdgeDrag(e,item));
+    }else{
+      hit.addEventListener('mousedown',e=>startEdgeDrag(e,item));
+      text.addEventListener('mousedown',e=>startEdgeDrag(e,item));
+      hit.addEventListener('touchstart',e=>startEdgeDrag(e,item),{passive:false});
+      text.addEventListener('touchstart',e=>startEdgeDrag(e,item),{passive:false});
+    }
+    g.addEventListener('mouseenter',()=>{
+      if(dragging||draggingEdge)return;
+      path.setAttribute('marker-end','url(#arwH)');g.classList.add('hl');
+      if(selected||selectedEdge)edgeEls.forEach(x=>{if(x.g!==g)x.g.classList.add('dim');});
+    });
+    g.addEventListener('mouseleave',()=>{
+      if(dragging||draggingEdge)return;
+      path.setAttribute('marker-end','url(#arw)');g.classList.remove('hl');
+      edgeEls.forEach(x=>x.g.classList.remove('dim'));
+    });
+    g.addEventListener('click',e=>{
+      e.stopPropagation();
+      if(moved)return;
+      selectedEdge=t;selected=null;render();renderDetail();
+    });
+    edgeEls.push(item);
+  });
+  visibleStateIds().forEach(id=>{
+    const s=STATES[id];
+    const g=el('g',{class:'node k-'+s.kind+(selected===id?' sel':'')},gNodes);
+    const rect=el('rect',{rx:6,width:NW,height:NH},g);
+    const text=el('text',{class:'nl'},g); text.textContent=s.label;
+    const title=el('title',{},g); title.textContent=s.full+'\n'+s.desc+'\n（可拖动）';
+    if(HAS_POINTER) g.addEventListener('pointerdown',e=>startDrag(e,id));
+    else { g.addEventListener('mousedown',e=>startDrag(e,id));
+           g.addEventListener('touchstart',e=>startDrag(e,id),{passive:false}); }
+    g.addEventListener('click',e=>{
+      e.stopPropagation();
+      if(moved)return;
+      selectedEdge=null;selected=(selected===id?null:id);render();renderDetail();
+    });
+    g.addEventListener('mouseenter',()=>{
+      if(dragging||draggingEdge)return;
+      edgeEls.forEach(x=>{
+        if(x.t.f===id||x.t.t===id){x.g.classList.add('hl');x.path.setAttribute('marker-end','url(#arwH)');}
+        else if(currentGroup!=='all'){x.g.classList.add('dim');}
+      });
+    });
+    g.addEventListener('mouseleave',()=>{
+      if(dragging||draggingEdge)return;
+      edgeEls.forEach(x=>{x.g.classList.remove('hl','dim');x.path.setAttribute('marker-end','url(#arw)');});
+    });
+    nodeEls[id]={g,rect,text};
+  });
+  updatePositions();
+}
+function evPoint(e){ return e.touches ? e.touches[0] : e; }
+function clientToSvg(e){
+  const r=svg.getBoundingClientRect(), p=evPoint(e);
+  return {x:(p.clientX-r.left)/r.width*VB_W, y:(p.clientY-r.top)/r.height*VB_H};
+}
+function attachDragListeners(){
+  if(HAS_POINTER){
+    window.addEventListener('pointermove',onMove);
+    window.addEventListener('pointerup',endDrag);
+    window.addEventListener('pointercancel',endDrag);
+  }else{
+    window.addEventListener('mousemove',onMove);
+    window.addEventListener('mouseup',endDrag);
+    window.addEventListener('touchmove',onMove,{passive:false});
+    window.addEventListener('touchend',endDrag);
+  }
+}
+function detachDragListeners(){
+  if(HAS_POINTER){
+    window.removeEventListener('pointermove',onMove);
+    window.removeEventListener('pointerup',endDrag);
+    window.removeEventListener('pointercancel',endDrag);
+  }else{
+    window.removeEventListener('mousemove',onMove);
+    window.removeEventListener('mouseup',endDrag);
+    window.removeEventListener('touchmove',onMove);
+    window.removeEventListener('touchend',endDrag);
+  }
+}
+function startDrag(e,id){
+  if(e.button!==undefined&&e.button!==0)return;
+  if(dragging||draggingEdge)return;
+  const pt=clientToSvg(e), p=evPoint(e);
+  dragging=id; draggingEdge=null; moved=false;
+  dragOff.x=pt.x-STATES[id].x; dragOff.y=pt.y-STATES[id].y;
+  downClient={x:p.clientX,y:p.clientY};
+  svg.classList.add('dragging');
+  attachDragListeners();
+}
+function startEdgeDrag(e,item){
+  if(e.button!==undefined&&e.button!==0)return;
+  if(dragging||draggingEdge)return;
+  const p=evPoint(e), pt=clientToSvg(e);
+  draggingEdge=item; dragging=null; moved=false;
+  downClient={x:p.clientX,y:p.clientY};
+  const s=STATES[item.t.f], en=STATES[item.t.t];
+  edgeDragBase={pt0:pt};
+  if(item.t.self){
+    edgeDragBase.self=true;
+    edgeDragBase.startH=item.t.selfH||96;
+    edgeDragBase.startY=s.y;
+  }else{
+    edgeDragBase.self=false;
+    const p1=rectPoint(s,en), p2=rectPoint(en,s);
+    const len=Math.hypot(en.x-s.x,en.y-s.y)||1;
+    edgeDragBase.mx=(p1.x+p2.x)/2; edgeDragBase.my=(p1.y+p2.y)/2;
+    edgeDragBase.nx=-(p2.y-p1.y)/len; edgeDragBase.ny=(p2.x-p1.x)/len;
+    edgeDragBase.startUc=(item.t.uc!==undefined?item.t.uc:hashCurve(item.t.f+'>'+item.t.t+item.t.e)*Math.min(1,len/240));
+  }
+  svg.classList.add('dragging');
+  attachDragListeners();
+}
+function onMove(e){
+  if(!dragging&&!draggingEdge)return;
+  const p=evPoint(e);
+  if(Math.hypot(p.clientX-downClient.x,p.clientY-downClient.y)>3)moved=true;
+  if(dragging){
+    const pt=clientToSvg(e);
+    const nx=Math.max(NW/2,Math.min(VB_W-NW/2,pt.x-dragOff.x));
+    const ny=Math.max(NH/2+6,Math.min(VB_H-NH/2,pt.y-dragOff.y));
+    STATES[dragging].x=nx; STATES[dragging].y=ny;
+  }else if(draggingEdge){
+    const pt=clientToSvg(e), b=edgeDragBase;
+    if(b.self){
+      draggingEdge.t.selfH=Math.max(40,Math.min(260,b.startH+(b.startY-96+2-pt.y)));
+    }else{
+      const delta=(pt.x-b.mx)*b.nx+(pt.y-b.my)*b.ny;
+      draggingEdge.t.uc=Math.max(-260,Math.min(260,2*delta));
+    }
+  }
+  updatePositions();
+}
+function endDrag(){
+  if(!dragging&&!draggingEdge)return;
+  dragging=null; draggingEdge=null; svg.classList.remove('dragging');
+  detachDragListeners();
+}
+svg.addEventListener('click',()=>{if(!moved){selectedEdge=null;selected=null;render();renderDetail();}});
+
+const tb=document.getElementById('toolbar');
+GROUPS.forEach(gp=>{
+  const b=document.createElement('button');
+  b.textContent=gp.name;b.dataset.g=gp.id;
+  if(gp.id==='all')b.classList.add('active');
+  b.addEventListener('click',()=>{
+    currentGroup=gp.id;selected=null;selectedEdge=null;
+    [...tb.children].forEach(x=>x.classList.toggle('active',x.dataset.g===gp.id));
+    render();renderDetail();
+  });
+  tb.appendChild(b);
+});
+const rb=document.createElement('button');
+rb.className='reset';rb.textContent='重置位置';
+rb.addEventListener('click',()=>{
+  for(const id in INIT){STATES[id].x=INIT[id].x;STATES[id].y=INIT[id].y;}
+  T.forEach(t=>{delete t.uc;delete t.selfH;});
+  updatePositions();
+});
+tb.appendChild(rb);
+
+render();renderDetail();
+</script>
+</body>
+</html>
