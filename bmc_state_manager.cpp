@@ -390,6 +390,7 @@ void BMC::discoverLastRebootCause()
     // on some systems so we always want to look for the pinhole reset
     // first as that would be the main reason AC power was lost.
     size_t chassisId = 0;
+    //查找是不是发生ac掉电了
     if (phosphor::state::manager::utils::checkACLoss(chassisId))
     {
         this->lastRebootCause(RebootCause::POR);
